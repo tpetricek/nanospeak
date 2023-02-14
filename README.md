@@ -1,0 +1,1 @@
+# Minimal Newspeak/Smalltalk inspired demo
