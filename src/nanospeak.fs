@@ -1,3 +1,8 @@
+#if INTERACTIVE
+#else
+module Nanospeak.Core
+#endif
+
 [<ReferenceEquality>]
 type Object = 
   { Class : Object option
