@@ -1,14 +1,24 @@
 module Nanospeak.App
 
 open Browser.Dom
+open Nanospeak
+open Nanospeak.Core
 
-// Mutable variable to count the number of times we clicked the button
-let mutable count = 0
+let demo = Core.vis |> Core.sendMessage "visualize" [Core.sp]
 
-// Get a reference to our button and cast the Element to an HTMLButtonElement
-let myButton = document.querySelector(".my-button") :?> Browser.Types.HTMLButtonElement
+let rec createHtml obj = 
+  match unbox obj.Class.Value.Slots.["name"].Value.Value with
+  | "String" ->       
+      document.createTextNode(unbox obj.Value.Value) : Browser.Types.Node
+  | "Html" ->
+      let tag = obj.Slots.["tag"].Value.Value :?> string
+      let res = document.createElement(tag)
+      for ch in obj.Slots.["children"].Slots.Values do
+        res.appendChild(createHtml ch) |> ignore
+      res
+  | className -> 
+      failwithf "createHtml: Unexpected class '%s'" className
 
-// Register our listener
-myButton.onclick <- fun _ ->
-    count <- count + 1
-    myButton.innerText <- sprintf "You clicked: %i time(s)" count
+createHtml demo
+|> document.getElementById("out").appendChild
+|> ignore

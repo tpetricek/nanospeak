@@ -6,7 +6,7 @@ var path = require("path");
 
 module.exports = {
     mode: "development",
-    entry: "./src/nanospeak.fs.js",
+    entry: "./src/app.fs.js",
     output: {
         path: path.join(__dirname, "./public"),
         filename: "bundle.js",
