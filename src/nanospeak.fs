@@ -1,4 +1,5 @@
 #if INTERACTIVE
+fsi.PrintDepth <- 15
 #else
 module Nanospeak.Core
 #endif
@@ -10,6 +11,7 @@ module Nanospeak.Core
 let (|L0|) = function [] -> () | _ -> failwith "L0: Expected empty list"
 let (|L1|) = function [v] -> v | _ -> failwith "L1: Expected list with 1 value"
 let (|L2|) = function [v1;v2] -> v1,v2 | _ -> failwith "L2: Expected list with 2 values"
+let (|L3|) = function [v1;v2;v3] -> v1,v2,v3 | _ -> failwith "L3: Expected list with 3 values"
 
 
 [<ReferenceEquality>]
@@ -22,7 +24,7 @@ type NativeFunc = Objekt -> Objekt list -> Objekt
 
 // TODO: This is probably wrong (depends on the language we are 
 // modelling? but I'm pretty sure it is wrong for all of them...)
-let Top = { Class = None; Value = None; Slots = Map.empty }
+let Top = { Class = None; Value = None; Slots = Map.ofSeq ["name", { Class = None; Value = Some "Top"; Slots = Map.empty } ] }
 let Metaclass = { Class = None; Value = None; Slots = Map.empty }
 let Class = { Class = Some Metaclass; Value = None; Slots = Map.empty }
 
@@ -37,23 +39,33 @@ let makeString (s:string) =
 let makeObject cls slots = 
   { Class = Some cls; Slots = Map.ofList slots; Value = None }
 
-let makeClass name parent =
+let makeClass name parent enclosing =
   makeObject Class [ 
     "parent", parent
+    "enclosing", enclosing
     "name", makeString name
     "methods", makeObject Lookup [ ]
   ]
 
-let Object = makeClass "Object" Top
-let Null = makeClass "Null" Object
-let Method = makeClass "Method" Object
-let NativeMethod = makeClass "NativeMethod" Object
+let top = makeObject Top []
 
-Str.Slots <- (makeClass "String" Object).Slots
-NativeObj.Slots <- (makeClass "NativeObj" Object).Slots
-Lookup.Slots <- (makeClass "Lookup" Object).Slots
-Metaclass.Slots <- (makeClass "Metaclass" Object).Slots
-Class.Slots <- (makeClass "Class" Object).Slots
+let Object = makeClass "Object" Top top
+let Null = makeClass "Null" Object top
+let Method = makeClass "Method" Object top
+let NativeMethod = makeClass "NativeMethod" Object top
+
+Str.Slots <- (makeClass "String" Object top).Slots
+NativeObj.Slots <- (makeClass "NativeObj" Object top).Slots
+Lookup.Slots <- (makeClass "Lookup" Object top).Slots
+Metaclass.Slots <- (makeClass "Metaclass" Object top).Slots
+Class.Slots <- (makeClass "Class" Object top).Slots
+
+(makeClass "Class" Object top).Slots.["parent"]
+
+Object.Slots.["name"].Value.Value
+
+Class.Slots.["name"].Value.Value
+Class.Slots.["parent"].Class.Value.Slots.["name"].Value.Value
 
 // let withSlot name value obj =
 //   { obj with Slots = obj.Slots.Add(name, value) }
@@ -116,7 +128,7 @@ Class
 
 Lookup 
   |> addMethod "add" (newNativeMethod (fun inst (L1(arg)) ->
-    let tryInt n = match System.Int32.TryParse(n) with true, n -> Some n | _ -> None
+    let tryInt (n:string) = match System.Int32.TryParse(n) with true, n -> Some n | _ -> None
     let i = inst.Slots.Keys |> Seq.choose tryInt |> Seq.append [-1] |> Seq.max
     inst.Slots <- inst.Slots.Add(string (i + 1), arg)
     inst
@@ -124,7 +136,7 @@ Lookup
   |> ignore
 
 let ObjectMirror = 
-  makeClass "ObjectMirror" Object
+  makeClass "ObjectMirror" Object top
   |> addSlot "object"
   |> addMethod "getClass" (newNativeMethod (fun inst (L0()) -> 
       inst.Slots.["object"].Class.Value
@@ -134,7 +146,7 @@ let ObjectMirror =
   ))
 
 let ClassMirror = 
-  makeClass "ClassMirror" Object
+  makeClass "ClassMirror" Object top
   |> addSlot "class"
   |> addMethod "addSlot" (newNativeMethod (fun inst (L1(name)) -> 
       if name.Class <> Some Str then failwith "ClassMirror.addSlot: 1st arg not a string"
@@ -159,7 +171,7 @@ let ClassMirror =
   ))
 
 let Platform = 
-  makeClass "Platform" Object
+  makeClass "Platform" Object top
   |> addMethod "reflectClass" (newNativeMethod (fun _ (L1(cls)) -> 
       if cls.Class <> Some Class && cls.Class <> Some Metaclass && cls.Class <> None then failwith "Platform.reflectClass: 1st arg not a class"
       makeObject ClassMirror [ "class", cls ]
@@ -167,10 +179,10 @@ let Platform =
   |> addMethod "reflectObject" (newNativeMethod (fun _ (L1(obj)) -> 
       makeObject ObjectMirror [ "object", obj ]
   ))
-  |> addMethod "newClass" (newNativeMethod (fun _ (L2(name, parent)) -> 
+  |> addMethod "newClass" (newNativeMethod (fun _ (L3(name, parent, enclosing)) -> 
       if name.Class <> Some Str then failwith "Platform.newClass: 1st arg not a string"
       if parent.Class <> Some Class then failwith "Platform.newClass: 2nd arg not a class"
-      makeClass (unbox name.Value.Value) parent
+      makeClass (unbox name.Value.Value) parent enclosing
   ))
   |> addMethod "getClass" (newNativeMethod (fun _ (L1(name)) -> 
       if name.Class <> Some Str then failwith "Platform.getClass: 1st arg not a string"
@@ -185,13 +197,13 @@ let Platform =
   |> addSlot "activation"
 
 let Activation = 
-  makeClass "Activation" Object
+  makeClass "Activation" Object top
   |> addSlot "self"
   |> addSlot "locals"
   |> addSlot "prev"
 
 let Locals = 
-  makeClass "Locals" Object
+  makeClass "Locals" Object top
 
 let p = makeObject Platform [
   "activation", makeObject Activation [ 
@@ -216,27 +228,37 @@ let rec withActivation selfOpt ctxOpt locals f =
   p |> sendMessage "set_activation" [prevAct] |> ignore
   res 
 
-and sendMessage msg args obj = 
+and evalMethod meth (args:_ list) obj =
+  if meth.Class = Some Method then
+    let vars = arrayValues meth.Slots.["args"] |> List.map (fun v -> v.Value.Value :?> string)
+    if vars.Length <> args.Length then failwith "sendMessage: Number of arguments did not match"
+    let varArgs = List.zip vars args
+    withActivation (Some obj) None varArgs (fun () ->
+        meth.Slots.["code"] |> sendMessage "eval" [] )
+  elif meth.Class = Some NativeMethod then
+    (meth.Slots.["func"].Value.Value :?> NativeFunc) obj args 
+  else 
+    failwith "sendMessage: Neither Method nor NativeMethod"
+
+and implicitReceiver self receiver msg =
+  // c.f. https://bracha.org/newspeak-modules.pdf, fig 6, except that 
+  // the following does not do 'enclosingDeclaration' in while loop
+  //printfn "Looking for implicit receiver in '%A'" receiver.Class.Value.Slots.["name"].Value.Value
+  if receiver.Class.Value = Top then self
+  elif receiver.Class.Value.Slots.["methods"].Slots.ContainsKey msg then receiver
+  else implicitReceiver self receiver.Class.Value.Slots.["enclosing"] msg
+    
+and sendMessage msg args self = 
+  let receiver = implicitReceiver self self msg
   let rec loop cls = 
-    match cls with 
-    | None -> failwithf "sendMessage: sending '%A' to Top or Metaclass failed" msg
-    | Some cls -> 
-        if cls = Top then failwithf "doesNotUnderstand '%s'" msg 
-        //printfn "Looking for '%s' in %A" msg cls.Slots.["name"].Value.Value
-        match cls.Slots.["methods"].Slots.TryFind msg with 
-        | Some meth -> 
-            if meth.Class = Some Method then
-              let vars = arrayValues meth.Slots.["args"] |> List.map (fun v -> v.Value.Value :?> string)
-              if vars.Length <> args.Length then failwith "sendMessage: Number of arguments did not match"
-              let varArgs = List.zip vars args
-              withActivation (Some obj) None varArgs (fun () ->
-                  meth.Slots.["code"] |> sendMessage "eval" [] )
-            elif meth.Class = Some NativeMethod then
-              (meth.Slots.["func"].Value.Value :?> NativeFunc) obj args
-            else 
-              failwith "sendMessage: Neither Method nor NativeMethod"
-        | None -> loop (cls.Slots.TryFind "parent")
-  loop obj.Class
+    if cls = Top then failwithf "sendMessage: doesNotUnderstand '%s'" msg 
+    match cls.Slots.["methods"].Slots.TryFind msg with 
+    | Some meth -> evalMethod meth args receiver
+    | None ->
+        //printfn $"""Current: {cls.Slots.["name"].Value.Value}"""
+        //printfn $"""Parent: {cls.Slots.["parent"].Class.Value.Slots.["name"].Value.Value}"""
+        loop (cls.Slots.["parent"])
+  loop receiver.Class.Value
 
 Lookup  
   |> addMethod "map" (newNativeMethod (fun inst (L1(f)) ->
@@ -257,7 +279,7 @@ Str
 
 
 let Closure = 
-  makeClass "Closure" Object
+  makeClass "Closure" Object top
   |> addSlot "args"
   |> addSlot "activation"
   |> addSlot "body"
@@ -272,35 +294,35 @@ let Closure =
   ))
 
 let Expr = 
-  makeClass "Expr" Object 
+  makeClass "Expr" Object top
   |> addMethod "eval" (newNativeMethod (fun _ (L0()) -> 
       failwithf "Expr.eval: Abstract method not implemented here"))
 let SeqExpr = 
-  makeClass "SeqExpr" Expr |> addSlot "e1" |> addSlot "e2"
+  makeClass "SeqExpr" Expr top |> addSlot "e1" |> addSlot "e2"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       inst.Slots.["e1"] |> sendMessage "eval" [] |> ignore
       inst.Slots.["e2"] |> sendMessage "eval" []
   ))
 let LookupExpr = 
-  makeClass "LookupExpr" Expr |> addSlot "values"
+  makeClass "LookupExpr" Expr top |> addSlot "values"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       makeObject Lookup 
         [ for kv in inst.Slots.["values"].Slots -> 
             kv.Key, sendMessage "eval" [] kv.Value ]
   ))
 let SelfExpr = 
-  makeClass "SelfExpr" Expr
+  makeClass "SelfExpr" Expr top 
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       let act = p |> sendMessage "get_activation" []
       act |> sendMessage "get_self" []
   ))
 let StringExpr = 
-  makeClass "StringExpr" Expr |> addSlot "value"
+  makeClass "StringExpr" Expr top |> addSlot "value"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       inst.Slots.["value"]
   ))
 let LocalExpr = 
-  makeClass "LocalExpr" Expr |> addSlot "name"
+  makeClass "LocalExpr" Expr top |> addSlot "name"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       let name = inst.Slots.["name"].Value.Value :?> string
       let rec loop act = 
@@ -320,7 +342,7 @@ let LocalExpr =
       | _ -> failwithf "LocalExpr.eval: Did not find '%s' in current activation" name
   ))
 let SendExpr = 
-  makeClass "SendExpr" Expr |> addSlot "receiver" |> addSlot "name" |> addSlot "args"
+  makeClass "SendExpr" Expr top |> addSlot "receiver" |> addSlot "name" |> addSlot "args"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       //printfn "EVALING SEND"
       let recv = inst.Slots.["receiver"] |> sendMessage "eval" []
@@ -331,7 +353,7 @@ let SendExpr =
       sendMessage name args recv
   ))
 let ClosureExpr = 
-  makeClass "ClosureExpr" Expr |> addSlot "args" |> addSlot "body"
+  makeClass "ClosureExpr" Expr top |> addSlot "args" |> addSlot "body"
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       makeObject Closure [
         "args", inst.Slots.["args"]
@@ -340,7 +362,7 @@ let ClosureExpr =
         "body", inst.Slots.["body"]] 
   ))
 let HoleExpr = 
-  makeClass "HoleExpr" Expr 
+  makeClass "HoleExpr" Expr top 
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       failwith "HoleExpr.eval: Cannot evaluate a hole"
   ))
@@ -360,12 +382,12 @@ let map els = makeObject LookupExpr ["values", makeObject Lookup els]
 
 let local' s = makeObject LocalExpr ["name", makeString s ] // Missing 'opened' and so editor will break
 
-let Boolean = makeClass "Boolean" Object
+let Boolean = makeClass "Boolean" Object top 
 let rec True = 
-  makeClass "True" Boolean
+  makeClass "True" Boolean top 
   |> addMethod "not" (newNativeMethod (fun _ _ -> False |> sendMessage "new" []))
 and False = 
-  makeClass "False" Boolean
+  makeClass "False" Boolean top 
   |> addMethod "not" (newNativeMethod (fun _ _ -> True |> sendMessage "new" []))
 
 let (?) r n args = 
@@ -413,7 +435,7 @@ let printSelf =
 // TODO: getClass should be replaced with better class lookup mechanism
 
 let Obj = p |> sendMessage "getClass" [makeString "Object"]
-let SelfPrinting = p |> sendMessage "newClass" [makeString "SelfPrinting"; Obj]
+let SelfPrinting = p |> sendMessage "newClass" [makeString "SelfPrinting"; Obj; top]
 let spMirror = p |> sendMessage "reflectClass" [SelfPrinting]
 spMirror |> sendMessage "addMethod" [makeString "printSelf"; newMethod [] printSelf] |> ignore
 spMirror |> sendMessage "addMethod" [makeString "helloWorld"; newMethod [] hello] |> ignore
@@ -447,7 +469,7 @@ Object
   |> ignore
 
 let Html = 
-  makeClass "Html" Object
+  makeClass "Html" Object top 
   |> addSlot "tag"
   |> addSlot "attributes"
   |> addSlot "children"
@@ -529,17 +551,17 @@ let om = self?get_p([])?reflectObject [self]
 *)
 
 let Visualizer = 
-  makeClass "Visualizer" Obj
+  makeClass "Visualizer" Obj top 
   |> addMethod "html" (newMethod ["tag"; "attributes"; "children"] html)
   |> addMethod "link" (newMethod ["lbl"; "obj"] link)
   |> addSlot "p"
 
 let ObjectVisualizer = 
-  makeClass "ObjectVisualizer" Visualizer
+  makeClass "ObjectVisualizer" Visualizer top 
   |> addMethod "visualize" (newMethod ["obj"] visualize)
 
 let StringVisualizer = 
-  makeClass "StringVisualizer" Visualizer
+  makeClass "StringVisualizer" Visualizer top 
   |> addMethod "visualize" (newMethod ["obj"] (  
     self?``do``([fn "v" (
       local("v")?html [
@@ -551,7 +573,7 @@ let StringVisualizer =
   ))
 
 let QuoteExpr = 
-  makeClass "QuoteExpr" Expr |> addSlot "e" 
+  makeClass "QuoteExpr" Expr top  |> addSlot "e" 
   |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
       inst.Slots.["o"] 
   ))
@@ -571,7 +593,7 @@ let becomef l replacement = fnn [] (
 )
 
 let ExprVisualizer = 
-  makeClass "ExprVisualizer" Visualizer
+  makeClass "ExprVisualizer" Visualizer top 
   |> addMethod "visualize" (newMethod ["obj"] (  
     self?``do``([fn "v" (
       local("v")?html [
@@ -696,7 +718,7 @@ HoleExpr |> addMethod "tokens" (newMethod [] (arr [
   ])) |> ignore
 
 let WorkspaceVisualizer = 
-  makeClass "WorkspaceVisualizer" Visualizer
+  makeClass "WorkspaceVisualizer" Visualizer top 
   |> addMethod "visualize" (newMethod ["workspace"] (  
     self?``do``([fn "v" (
       local("v")?html [
@@ -721,7 +743,7 @@ let WorkspaceVisualizer =
    
 
 let Workspace = 
-  makeClass "Workspace" Object
+  makeClass "Workspace" Object top 
   |> addSlot "output"
   |> addSlot "code"
   |> addMethod "visualizer" (newMethod [] (local("workspaceVisualizer")))
@@ -791,3 +813,21 @@ printClass ^ <String> = (
 // implementation that hides the value of the password.
 
 
+
+
+// --------------------------------------------------------------------------------------
+// Nested classes
+// --------------------------------------------------------------------------------------
+
+let test () =
+  let A =
+    makeClass "A" Object top
+    |> addSlot "demo"
+  let A_B =
+    makeClass "B" Object (makeObject A ["demo", makeString "Hi there"])
+    |> addMethod "getDemo1" (newMethod [] (local "demo"))
+    |> addMethod "getDemo2" (newMethod [] (self?get_demo([])))
+  let res = 
+    makeObject A_B []
+    |> sendMessage "getDemo2" []
+  unbox res.Value.Value = "Hi there"

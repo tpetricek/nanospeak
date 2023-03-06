@@ -60,4 +60,6 @@ Visualizer |> addMethod "open" (newNativeMethod (fun _ (L1(obj)) ->
 //openObject sp
 //openObject ov
 //openObject (local("workspace")?print([str "Hello world!"]))
+openObject sp
 openObject workspace
+openObject visualize
