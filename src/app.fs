@@ -57,9 +57,11 @@ Visualizer |> addMethod "open" (newNativeMethod (fun _ (L1(obj)) ->
 //openObject visualize
 //workspace |> sendMessage "set_code" [ (local("workspace")?print([str "Hello world!"])) ] |> ignore
 
+test2() |> ignore
+
 //openObject sp
 //openObject ov
-//openObject (local("workspace")?print([str "Hello world!"]))
 openObject sp
 openObject workspace
+openObject (local("workspace")?print([str "Hello world!"]))
 openObject visualize

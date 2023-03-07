@@ -1,5 +1,5 @@
 #if INTERACTIVE
-fsi.PrintDepth <- 15
+fsi.PrintDepth <- 10
 #else
 module Nanospeak.Core
 #endif
@@ -47,26 +47,28 @@ let makeClass name parent enclosing =
     "methods", makeObject Lookup [ ]
   ]
 
-let top = makeObject Top []
+let TopModule = makeClass "TopMOdule" Top (makeObject Top [])
+let topModule = makeObject TopModule []
 
-let Object = makeClass "Object" Top top
-let Null = makeClass "Null" Object top
-let Method = makeClass "Method" Object top
-let NativeMethod = makeClass "NativeMethod" Object top
+let Object = makeClass "Object" Top topModule
+let Null = makeClass "Null" Object topModule
+let Method = makeClass "Method" Object topModule
+let NativeMethod = makeClass "NativeMethod" Object topModule
 
-Str.Slots <- (makeClass "String" Object top).Slots
-NativeObj.Slots <- (makeClass "NativeObj" Object top).Slots
-Lookup.Slots <- (makeClass "Lookup" Object top).Slots
-Metaclass.Slots <- (makeClass "Metaclass" Object top).Slots
-Class.Slots <- (makeClass "Class" Object top).Slots
+Str.Slots <- (makeClass "String" Object topModule).Slots
+NativeObj.Slots <- (makeClass "NativeObj" Object topModule).Slots
+Lookup.Slots <- (makeClass "Lookup" Object topModule).Slots
+Metaclass.Slots <- (makeClass "Metaclass" Object topModule).Slots
+Class.Slots <- (makeClass "Class" Object topModule).Slots
 
-(makeClass "Class" Object top).Slots.["parent"]
+(*
+(makeClass "Class" Object topModule).Slots.["parent"]
 
 Object.Slots.["name"].Value.Value
 
 Class.Slots.["name"].Value.Value
 Class.Slots.["parent"].Class.Value.Slots.["name"].Value.Value
-
+*)
 // let withSlot name value obj =
 //   { obj with Slots = obj.Slots.Add(name, value) }
 
@@ -127,6 +129,11 @@ Class
   |> ignore
 
 Lookup 
+  |> addMethod "addMap" (newNativeMethod (fun inst (L2(k, arg)) ->
+    if k.Class <> Some Str then failwith "Lookup.addMap: 1st arg not a string"
+    inst.Slots <- inst.Slots.Add(unbox k.Value.Value, arg)
+    inst
+  ))
   |> addMethod "add" (newNativeMethod (fun inst (L1(arg)) ->
     let tryInt (n:string) = match System.Int32.TryParse(n) with true, n -> Some n | _ -> None
     let i = inst.Slots.Keys |> Seq.choose tryInt |> Seq.append [-1] |> Seq.max
@@ -136,7 +143,7 @@ Lookup
   |> ignore
 
 let ObjectMirror = 
-  makeClass "ObjectMirror" Object top
+  makeClass "ObjectMirror" Object topModule
   |> addSlot "object"
   |> addMethod "getClass" (newNativeMethod (fun inst (L0()) -> 
       inst.Slots.["object"].Class.Value
@@ -146,7 +153,7 @@ let ObjectMirror =
   ))
 
 let ClassMirror = 
-  makeClass "ClassMirror" Object top
+  makeClass "ClassMirror" Object topModule
   |> addSlot "class"
   |> addMethod "addSlot" (newNativeMethod (fun inst (L1(name)) -> 
       if name.Class <> Some Str then failwith "ClassMirror.addSlot: 1st arg not a string"
@@ -171,7 +178,7 @@ let ClassMirror =
   ))
 
 let Platform = 
-  makeClass "Platform" Object top
+  makeClass "Platform" Object topModule
   |> addMethod "reflectClass" (newNativeMethod (fun _ (L1(cls)) -> 
       if cls.Class <> Some Class && cls.Class <> Some Metaclass && cls.Class <> None then failwith "Platform.reflectClass: 1st arg not a class"
       makeObject ClassMirror [ "class", cls ]
@@ -197,13 +204,13 @@ let Platform =
   |> addSlot "activation"
 
 let Activation = 
-  makeClass "Activation" Object top
+  makeClass "Activation" Object topModule
   |> addSlot "self"
   |> addSlot "locals"
   |> addSlot "prev"
 
 let Locals = 
-  makeClass "Locals" Object top
+  makeClass "Locals" Object topModule
 
 let p = makeObject Platform [
   "activation", makeObject Activation [ 
@@ -213,7 +220,7 @@ let p = makeObject Platform [
 ]
 
 let rec withActivation selfOpt ctxOpt locals f = 
-  let prevAct = p |> sendMessage "get_activation" []
+  let prevAct = p.Slots.["activation"]
   let self = defaultArg selfOpt (prevAct.Slots.["self"])
   // TODO: Should we create anonymous class inherited from Activation with corresponding slots?
   let locals = makeObject Locals locals
@@ -221,11 +228,13 @@ let rec withActivation selfOpt ctxOpt locals f =
     yield! [ "prev", prevAct; "self", self; "locals", locals ]
     match ctxOpt with Some ctx -> yield "context", ctx | _ -> ()
   ]
-  p |> sendMessage "set_activation" [act] |> ignore
-  let res = f () 
-  let currAct = p |> sendMessage "get_activation" []
-  let prevAct = currAct |> sendMessage "get_prev" []
-  p |> sendMessage "set_activation" [prevAct] |> ignore
+  //printfn "Set activation! Class of new self: %s" (unbox act.Slots.["self"].Class.Value.Slots.["name"].Value.Value)
+  p.Slots <- p.Slots.Add("activation", act)
+  let res = f act
+  let currAct = p.Slots.["activation"]
+  let prevAct = currAct.Slots.["prev"]
+  //printfn "Revert activation! Class of new self: %s" (unbox prevAct.Slots.["self"].Class.Value.Slots.["name"].Value.Value)
+  p.Slots <- p.Slots.Add("activation", prevAct) 
   res 
 
 and evalMethod meth (args:_ list) obj =
@@ -233,10 +242,12 @@ and evalMethod meth (args:_ list) obj =
     let vars = arrayValues meth.Slots.["args"] |> List.map (fun v -> v.Value.Value :?> string)
     if vars.Length <> args.Length then failwith "sendMessage: Number of arguments did not match"
     let varArgs = List.zip vars args
-    withActivation (Some obj) None varArgs (fun () ->
-        meth.Slots.["code"] |> sendMessage "eval" [] )
+    withActivation (Some obj) None varArgs (fun act ->
+        meth.Slots.["code"] |> sendMessage "eval" [act] )
   elif meth.Class = Some NativeMethod then
-    (meth.Slots.["func"].Value.Value :?> NativeFunc) obj args 
+    withActivation (Some obj) None [] (fun act ->
+      (meth.Slots.["func"].Value.Value :?> NativeFunc) obj args 
+    )
   else 
     failwith "sendMessage: Neither Method nor NativeMethod"
 
@@ -248,12 +259,15 @@ and implicitReceiver self receiver msg =
   elif receiver.Class.Value.Slots.["methods"].Slots.ContainsKey msg then receiver
   else implicitReceiver self receiver.Class.Value.Slots.["enclosing"] msg
     
-and sendMessage msg args self = 
-  let receiver = implicitReceiver self self msg
+and sendMessage msg args receiver = 
   let rec loop cls = 
-    if cls = Top then failwithf "sendMessage: doesNotUnderstand '%s'" msg 
+    if cls = Top then 
+      failwithf "sendMessage: doesNotUnderstand '%s' (receiver: %s)" msg 
+        (unbox receiver.Class.Value.Slots.["name"].Value.Value)
     match cls.Slots.["methods"].Slots.TryFind msg with 
-    | Some meth -> evalMethod meth args receiver
+    | Some meth -> 
+        //printfn "Eval method: %s" msg
+        evalMethod meth args receiver
     | None ->
         //printfn $"""Current: {cls.Slots.["name"].Value.Value}"""
         //printfn $"""Parent: {cls.Slots.["parent"].Class.Value.Slots.["name"].Value.Value}"""
@@ -279,7 +293,7 @@ Str
 
 
 let Closure = 
-  makeClass "Closure" Object top
+  makeClass "Closure" Object topModule
   |> addSlot "args"
   |> addSlot "activation"
   |> addSlot "body"
@@ -289,41 +303,47 @@ let Closure =
       let declActivation = inst.Slots.["activation"]
       if vars.Length <> args.Length then failwith "Closure.value: Number of arguments did not match"
       let varArgs = List.zip vars args
-      withActivation None (Some declActivation) varArgs (fun () -> 
-        body |> sendMessage "eval" [])
+      withActivation (Some declActivation.Slots.["self"]) (Some declActivation) varArgs (fun act -> 
+        body |> sendMessage "eval" [act])
   ))
 
 let Expr = 
-  makeClass "Expr" Object top
-  |> addMethod "eval" (newNativeMethod (fun _ (L0()) -> 
+  makeClass "Expr" Object topModule
+  |> addMethod "eval" (newNativeMethod (fun _ (L1(act)) -> 
       failwithf "Expr.eval: Abstract method not implemented here"))
 let SeqExpr = 
-  makeClass "SeqExpr" Expr top |> addSlot "e1" |> addSlot "e2"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
-      inst.Slots.["e1"] |> sendMessage "eval" [] |> ignore
-      inst.Slots.["e2"] |> sendMessage "eval" []
+  makeClass "SeqExpr" Expr topModule |> addSlot "e1" |> addSlot "e2"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
+      inst.Slots.["e1"] |> sendMessage "eval" [act] |> ignore
+      inst.Slots.["e2"] |> sendMessage "eval" [act]
   ))
 let LookupExpr = 
-  makeClass "LookupExpr" Expr top |> addSlot "values"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "LookupExpr" Expr topModule |> addSlot "values"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       makeObject Lookup 
         [ for kv in inst.Slots.["values"].Slots -> 
-            kv.Key, sendMessage "eval" [] kv.Value ]
+            kv.Key, sendMessage "eval" [act] kv.Value ]
   ))
 let SelfExpr = 
-  makeClass "SelfExpr" Expr top 
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
-      let act = p |> sendMessage "get_activation" []
-      act |> sendMessage "get_self" []
+  makeClass "SelfExpr" Expr topModule 
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
+      let s = act |> sendMessage "get_self" []
+      //printfn "Class of 'self': %s" (unbox s.Class.Value.Slots.["name"].Value.Value)
+      s
+  ))
+let ImplicitExpr = 
+  makeClass "ImplicitExpr" Expr topModule 
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
+      failwith "Implicitexpr.eval: Not supposed to be evaluated!"
   ))
 let StringExpr = 
-  makeClass "StringExpr" Expr top |> addSlot "value"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "StringExpr" Expr topModule |> addSlot "value"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       inst.Slots.["value"]
   ))
 let LocalExpr = 
-  makeClass "LocalExpr" Expr top |> addSlot "name"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "LocalExpr" Expr topModule |> addSlot "name"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       let name = inst.Slots.["name"].Value.Value :?> string
       let rec loop act = 
         //printfn "Looking for local '%s' in: %A" name (String.concat ", " (act.Slots.["locals"].Slots.Keys))
@@ -336,35 +356,40 @@ let LocalExpr =
               match act.Slots.TryFind "prev" with
               | Some prevAct -> loop prevAct
               | _ -> None )
-      let act = p |> sendMessage "get_activation" []
       match loop act with 
       | Some res -> res
       | _ -> failwithf "LocalExpr.eval: Did not find '%s' in current activation" name
   ))
 let SendExpr = 
-  makeClass "SendExpr" Expr top |> addSlot "receiver" |> addSlot "name" |> addSlot "args"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "SendExpr" Expr topModule |> addSlot "receiver" |> addSlot "name" |> addSlot "args"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       //printfn "EVALING SEND"
-      let recv = inst.Slots.["receiver"] |> sendMessage "eval" []
-      let name = inst.Slots.["name"].Value.Value :?> string
+      let msg = inst.Slots.["name"].Value.Value :?> string
+      let receiver = 
+        if inst.Slots.["receiver"].Class.Value = ImplicitExpr then
+          let self = act.Slots.["self"]
+          implicitReceiver self self msg
+        else 
+          inst.Slots.["receiver"] |> sendMessage "eval" [act]
+
       // TODO: This should send 'forEach' to the array?
-      let args = arrayValues inst.Slots.["args"] |> List.map (sendMessage "eval" [] )  
+      let args = arrayValues inst.Slots.["args"] |> List.map (sendMessage "eval" [act] )  
       //printfn "SENDING %s" (unbox name.Value.Value) 
-      sendMessage name args recv
+      sendMessage msg args receiver
   ))
 let ClosureExpr = 
-  makeClass "ClosureExpr" Expr top |> addSlot "args" |> addSlot "body"
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "ClosureExpr" Expr topModule |> addSlot "args" |> addSlot "body"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       makeObject Closure [
         "args", inst.Slots.["args"]
-        // TODO: How should closure capture local variables?
-        "activation", p |> sendMessage "get_activation" [] 
+        "activation", act
         "body", inst.Slots.["body"]] 
   ))
 let HoleExpr = 
-  makeClass "HoleExpr" Expr top 
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
-      failwith "HoleExpr.eval: Cannot evaluate a hole"
+  makeClass "HoleExpr" Expr topModule |> addSlot "wrapped"
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
+      if inst.Slots.["wrapped"].Class.Value = Null then failwith "HoleExpr.eval: Cannot evaluate an empty hole"
+      else inst.Slots.["wrapped"] |> sendMessage "eval" [act]
   ))
 
 // --------------------------------------------------------------------------------------
@@ -382,12 +407,12 @@ let map els = makeObject LookupExpr ["values", makeObject Lookup els]
 
 let local' s = makeObject LocalExpr ["name", makeString s ] // Missing 'opened' and so editor will break
 
-let Boolean = makeClass "Boolean" Object top 
+let Boolean = makeClass "Boolean" Object topModule 
 let rec True = 
-  makeClass "True" Boolean top 
+  makeClass "True" Boolean topModule 
   |> addMethod "not" (newNativeMethod (fun _ _ -> False |> sendMessage "new" []))
 and False = 
-  makeClass "False" Boolean top 
+  makeClass "False" Boolean topModule 
   |> addMethod "not" (newNativeMethod (fun _ _ -> True |> sendMessage "new" []))
 
 let (?) r n args = 
@@ -398,6 +423,8 @@ let (?) r n args =
     "args", makeObject Lookup [
       for i, a in Seq.indexed args -> string i, a ]
   ]
+
+let implicit = makeObject ImplicitExpr []
 let local s = makeObject LocalExpr ["name", makeString s; "opened", makeObject False []]
 let str s = makeObject StringExpr ["value", makeString s; "opened", makeObject False []]
 
@@ -435,7 +462,7 @@ let printSelf =
 // TODO: getClass should be replaced with better class lookup mechanism
 
 let Obj = p |> sendMessage "getClass" [makeString "Object"]
-let SelfPrinting = p |> sendMessage "newClass" [makeString "SelfPrinting"; Obj; top]
+let SelfPrinting = p |> sendMessage "newClass" [makeString "SelfPrinting"; Obj; topModule]
 let spMirror = p |> sendMessage "reflectClass" [SelfPrinting]
 spMirror |> sendMessage "addMethod" [makeString "printSelf"; newMethod [] printSelf] |> ignore
 spMirror |> sendMessage "addMethod" [makeString "helloWorld"; newMethod [] hello] |> ignore
@@ -469,99 +496,89 @@ Object
   |> ignore
 
 let Html = 
-  makeClass "Html" Object top 
+  makeClass "Html" Object topModule 
   |> addSlot "tag"
   |> addSlot "attributes"
   |> addSlot "children"
 
 let html = 
-  self?get_p([])?``do``([fn "p" (
-    local("Html")?``new``([])?``do``([fn "h" (
-          local("h")?set_tag([local("tag")]) 
-      <.> local("h")?set_attributes([local("attributes")]) 
-      <.> local("h")?set_children([local("children")]) 
-      <.> local("h")
-    )])
+  implicit?get_Html([])?``new``([])?``do``([fn "h" (
+        local("h")?set_tag([local("tag")]) 
+    <.> local("h")?set_attributes([local("attributes")]) 
+    <.> local("h")?set_children([local("children")]) 
+    <.> local("h")
   )])
 
 let link = 
-  self?``do``([fn "v" (
-    let click = fnn [] (local("v")?``open`` [local "obj"])
-    self?html [ str "a"; map ["href", str "javascript:;"; "click", click ]; arr [str "open"] ] 
-  )])
+  let click = fnn [] (implicit?``open`` [local "obj"])
+  self?html [ 
+    str "a"; map ["href", str "javascript:;"; "click", click ]; arr [str "open"] 
+  ] 
 
 let visualize =
   // TODO: Store 'self' in a local variable first, because 'self' does not
   // work inside code blocks (not sure how this should be done right...)
-  self?``do``([fn "v" (
-    let om = local("v")?get_p([])?reflectObject [local "obj"]
-    let cl = om?getClass []
-    let cm = local("v")?get_p([])?reflectClass [cl]
-    let cn = cm?getName([])
-    let meths = cm?getMethods([])?map [fnn ["name";"method"] (
-      local("v")?html [
-        str "li"
-        map []
-        arr [local "name"]
-      ]
-    )]
-    let slots = om?getSlots([])?map [fnn ["name";"value"] (
-      local("v")?html [
-        str "li"
-        map []
-        arr [
-          local "name"
-          str " ("
-          local("v")?link [ str "open"; local "value" ]
-          str ")"
-        ]
-      ]
-    )]
-    local("v")?html [
-      str "div"
-      map [ "class", str "obj" ]
+  let om = implicit?get_p([])?reflectObject [local "obj"]
+  let cl = om?getClass []
+  let cm = implicit?get_p([])?reflectClass [cl]
+  let cn = cm?getName([])
+  let meths = cm?getMethods([])?map [fnn ["name";"method"] (
+    implicit?html [
+      str "li"
+      map []
+      arr [local "name"]
+    ]
+  )]
+  let slots = om?getSlots([])?map [fnn ["name";"value"] (
+    implicit?html [
+      str "li"
+      map []
       arr [
-        local("v")?html [ 
-          str "h2"; map []; 
-          arr [ 
-            str "Class: "; local("v")?html [ str "strong"; map []; arr [ cn ] ] 
-            str " ("
-            local("v")?link [ str "open"; cl ]
-            str ")"
-          ] 
-        ]
-        cn?eq([str "String"])?``if``([
-          fnn[] (local("v")?html [ str "p"; map []; arr [ str "Value: "; local("obj") ]])
-          fnn[] (str "")
-        ])
-        local("v")?html [ str "h3"; map []; arr [ str "Slots" ] ]
-        local("v")?html [ str "ul"; map []; slots ]
-        //local("v")?html [ str "h3"; map []; arr [ str "Methods" ] ]
-        //local("v")?html [ str "ul"; map []; meths ]
+        local "name"
+        str " ("
+        implicit?link [ str "open"; local "value" ]
+        str ")"
       ]
     ]
-  )])
-  // cm?getName([])
-
-(*
-let om = self?get_p([])?reflectObject [self]
-  cm?getMethods([])?map [fnn ["name";"method"] (
-    self?get_p([])?print [local "name"]
   )]
-*)
+  implicit?html [
+    str "div"
+    map [ "class", str "obj" ]
+    arr [
+      implicit?html [ 
+        str "h2"; map []; 
+        arr [ 
+          str "Class: "; implicit?html [ str "strong"; map []; arr [ cn ] ] 
+          str " ("
+          implicit?link [ str "open"; cl ]
+          str ")"
+        ] 
+      ]
+      (*
+      cn?eq([str "String"])?``if``([
+        fnn[] (local("v")?html [ str "p"; map []; arr [ str "Value: "; local("obj") ]])
+        fnn[] (str "")
+      ])
+      *)
+      implicit?html [ str "h3"; map []; arr [ str "Slots" ] ]
+      implicit?html [ str "ul"; map []; slots ]
+      implicit?html [ str "h3"; map []; arr [ str "Methods" ] ]
+      implicit?html [ str "ul"; map []; meths ]
+    ]
+  ]
 
 let Visualizer = 
-  makeClass "Visualizer" Obj top 
+  makeClass "Visualizer" Obj topModule 
   |> addMethod "html" (newMethod ["tag"; "attributes"; "children"] html)
   |> addMethod "link" (newMethod ["lbl"; "obj"] link)
   |> addSlot "p"
 
 let ObjectVisualizer = 
-  makeClass "ObjectVisualizer" Visualizer top 
+  makeClass "ObjectVisualizer" Visualizer topModule 
   |> addMethod "visualize" (newMethod ["obj"] visualize)
 
 let StringVisualizer = 
-  makeClass "StringVisualizer" Visualizer top 
+  makeClass "StringVisualizer" Visualizer topModule 
   |> addMethod "visualize" (newMethod ["obj"] (  
     self?``do``([fn "v" (
       local("v")?html [
@@ -573,8 +590,8 @@ let StringVisualizer =
   ))
 
 let QuoteExpr = 
-  makeClass "QuoteExpr" Expr top  |> addSlot "e" 
-  |> addMethod "eval" (newNativeMethod (fun inst (L0()) -> 
+  makeClass "QuoteExpr" Expr topModule  |> addSlot "e" 
+  |> addMethod "eval" (newNativeMethod (fun inst (L1(act)) -> 
       inst.Slots.["o"] 
   ))
 let quote o = 
@@ -583,7 +600,8 @@ let vz o = o?visualizer([])?visualize([o])
 let ssv = self?visualizer([])
 
 HoleExpr |> addSlot "opened" |> ignore
-let hole () = makeObject HoleExpr [ "opened", makeObject False [] ]
+let hole () = makeObject HoleExpr [ "opened", makeObject False []; "wrapped", makeObject Null [] ]
+let holeWrap o = makeObject HoleExpr [ "opened", makeObject False []; "wrapped", o ]
 
 
 
@@ -592,20 +610,36 @@ let becomef l replacement = fnn [] (
   local(l)?``visualizer``([])?``update`` []
 )
 
+let becomehw l = fnn [] (
+  quote(hole())?clone([])?``do``([ fn "h" (
+    local("h")?set_wrapped([local(l)?clone([])]) <.>
+    //implicit?``open``([local(l)]) <.>
+    //implicit?``open``([local("h")])  <.>
+    local(l)?become [local("h")] <.>
+    local(l)?``visualizer``([])?``update`` []
+  )])
+)
+
+  //local(l)?become [quote(replacement)?clone([])] <.>
+//)
+
 let ExprVisualizer = 
-  makeClass "ExprVisualizer" Visualizer top 
+  makeClass "ExprVisualizer" Visualizer topModule 
   |> addMethod "visualize" (newMethod ["obj"] (  
     self?``do``([fn "v" (
       local("v")?html [
         str "div"
         map [ "class", str "obj" ]
-        (local("obj")?tokens [])?add([
+        arr [
           local("v")?html [
             str "a"
-            map [ "href", str "javascript:;"; "click", becomef "obj" (hole ()) ]
+            map [ 
+              "class", str "close"; "href", str "javascript:;"; 
+              "click", becomehw "obj" ]
             arr [ str "x" ]
           ]
-        ])
+          local("v")?html [str "span"; map []; (local("obj")?tokens []) ]
+        ]        
       ]
     )])
   ))
@@ -616,14 +650,24 @@ SeqExpr |> addMethod "tokens" (newMethod [] (arr [
     self?get_e2 [] |> vz
   ])) |> ignore
 LookupExpr |> addMethod "tokens" (newMethod [] (arr [
-    str "["
-    ssv?html [ str "span"; map []; self?get_values([])?map [fnn ["k"; "v"] (
-      ssv?html [ str "span"; map []; arr [ local("k"); str "="; local("v") |> vz ]]
-    )] ]
-    str "]"
+    ssv?html [ 
+      str "ul"; map []; 
+      self?get_values([])?map([fnn ["k"; "v"] (
+        ssv?html [ str "li"; map []; arr [ local("k"); str "="; local("v") |> vz ]]
+      )])?add([
+        ssv?html [ str "li"; map []; arr [ 
+          ssv?html [ 
+            str "a"; map [ "href", str "javascript:;"; "class", str "add"]; 
+            arr [str "+"] ] 
+        ]]
+      ])
+    ]
   ])) |> ignore
 SelfExpr |> addMethod "tokens" (newMethod [] (arr [
     str "self"
+  ])) |> ignore
+ImplicitExpr |> addMethod "tokens" (newMethod [] (arr [
+    str "?"
   ])) |> ignore
 
 let stringEdit isStr = 
@@ -668,7 +712,7 @@ SendExpr |> addSlot "opened" |> addMethod "tokens" (newMethod [] (
       local("v")?get_args([])?add([quote(hole ())]) <.>
       local("v")?visualizer([])?update([])
     )
-    ssv?html [ str "a"; map [ "href", str "javascript:;"; "click", add]; arr [ str "+" ] ]
+    ssv?html [ str "a"; map [ "class", str "add"; "href", str "javascript:;"; "click", add]; arr [ str "+" ] ]
   ])]))) |> ignore
 
 ClosureExpr |> addMethod "tokens" (newMethod [] (arr [
@@ -718,32 +762,31 @@ HoleExpr |> addMethod "tokens" (newMethod [] (arr [
   ])) |> ignore
 
 let WorkspaceVisualizer = 
-  makeClass "WorkspaceVisualizer" Visualizer top 
+  makeClass "WorkspaceVisualizer" Visualizer topModule 
   |> addMethod "visualize" (newMethod ["workspace"] (  
-    self?``do``([fn "v" (
-      local("v")?html [
-        str "div"
-        map [ "class", str "obj" ]
-        arr [ 
-          local("v")?html [ str "h2"; map []; arr [str "Workspace"]]
-          local("v")?html [ str "h3"; map []; arr [str "Code"]]
-          ( let c = local("workspace")?get_code([]) in c?visualizer([])?visualize([c]) )
-          local("v")?html [ str "h3"; map []; arr [str "Output"]]
-          local("workspace")?get_output([]) 
-          local("v")?html [ str "h3"; map []; arr [str "Commands"]]
-          ( let doit = fnn [] (
-              local("workspace")?get_code([])?eval([]) <.> 
-              local("v")?update([])
-            )
-            local("v")?html [ str "a"; map [ "href", str "javascript:;"; "click", doit ]; arr [ str "Run!" ] ] )
-        ]
+    implicit?html [
+      str "div"
+      map [ "class", str "obj" ]
+      arr [ 
+        implicit?html [ str "h2"; map []; arr [str "Workspace"]]
+        implicit?html [ str "h3"; map []; arr [str "Code"]]
+        ( let c = local("workspace")?get_code([]) in c?visualizer([])?visualize([c]) )
+        implicit?html [ str "h3"; map []; arr [str "Output"]]
+        local("workspace")?get_output([]) 
+        implicit?html [ str "h3"; map []; arr [str "Commands"]]
+        ( let doit = fnn [] (
+            let act = implicit?get_p([])?get_activation([])
+            local("workspace")?get_code([])?eval([act]) <.> 
+            implicit?update([])
+          )
+          implicit?html [ str "a"; map [ "href", str "javascript:;"; "click", doit ]; arr [ str "Run!" ] ] )
       ]
-    )])
+    ]
   ))
    
 
 let Workspace = 
-  makeClass "Workspace" Object top 
+  makeClass "Workspace" Object topModule 
   |> addSlot "output"
   |> addSlot "code"
   |> addMethod "visualizer" (newMethod [] (local("workspaceVisualizer")))
@@ -763,9 +806,13 @@ sv |> sendMessage "set_p" [p] |> ignore
 let ev = ExprVisualizer |> sendMessage "new" [] 
 ev |> sendMessage "set_p" [p] |> ignore
 
+TopModule |> addSlot "Html" |> ignore
+topModule.Slots <- topModule.Slots.Add("Html", Html)
+
 p.Slots.["activation"].Slots.["locals"].Slots <-
   p.Slots.["activation"].Slots.["locals"].Slots
-    .Add("Html", Html).Add("objectVisualizer", ov)
+    //.Add("Html", Html)
+    .Add("objectVisualizer", ov)
       .Add("stringVisualizer", sv).Add("exprVisualizer", ev).Add("workspaceVisualizer", wv)
         .Add("StringExpr", StringExpr).Add("LocalExpr", LocalExpr).Add("false", makeObject False [])
           .Add("workspace", workspace)
@@ -821,13 +868,17 @@ printClass ^ <String> = (
 
 let test () =
   let A =
-    makeClass "A" Object top
+    makeClass "A" Object topModule
     |> addSlot "demo"
   let A_B =
     makeClass "B" Object (makeObject A ["demo", makeString "Hi there"])
-    |> addMethod "getDemo1" (newMethod [] (local "demo"))
-    |> addMethod "getDemo2" (newMethod [] (self?get_demo([])))
+    |> addMethod "getDemo1" (newMethod [] (implicit?get_demo([])))
+    |> addMethod "getDemo2" (newMethod [] (self?getDemo1([])))
   let res = 
     makeObject A_B []
     |> sendMessage "getDemo2" []
   unbox res.Value.Value = "Hi there"
+
+let test2 () = 
+  let vis = sp |> sendMessage "visualizer" []
+  vis |> sendMessage "visualize" [sp]
