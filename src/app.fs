@@ -59,9 +59,15 @@ Visualizer |> addMethod "open" (newNativeMethod (fun _ (L1(obj)) ->
 
 //test2() |> ignore
 
-openObject sp
+
 //openObject ov
 //openObject sp
-openObject workspace
+//openObject workspace
 //openObject (local("workspace")?print([str "Hello world!"]))
-openObject visualize
+//openObject ov
+//openObject visualize
+
+sp.Class.Value |> addSlot "visualizer" |> ignore
+sp |> sendMessage "set_visualizer" [ov] |> ignore
+
+openObject sp

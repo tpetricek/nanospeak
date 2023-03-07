@@ -140,6 +140,11 @@ Lookup
     inst.Slots <- inst.Slots.Add(string (i + 1), arg)
     inst
   ))
+  |> addMethod "remove" (newNativeMethod (fun inst (L1(key)) ->
+    if key.Class <> Some Str then failwith "Lookup.remove: 1st arg not a string"
+    inst.Slots <- inst.Slots.Remove(unbox key.Value.Value)
+    inst
+  ))
   |> ignore
 
 let ObjectMirror = 
@@ -561,15 +566,15 @@ let visualize =
       ]
       implicit?html [ str "h3"; map []; arr [ str "Slots" ] ]
       implicit?html [ str "ul"; map []; slots ]
-      implicit?html [ str "h3"; map []; arr [ str "Methods" ] ]
-      implicit?html [ str "ul"; map []; meths ]
+      //implicit?html [ str "h3"; map []; arr [ str "Methods" ] ]
+      //implicit?html [ str "ul"; map []; meths ]
     ]
   ]
 
 let Visualizer = 
   makeClass "Visualizer" Obj topModule 
   |> addMethod "html" (newMethod ["tag"; "attributes"; "children"] html)
-  |> addMethod "link" (newMethod ["lbl"; "obj"] link)
+  |> addMethod "link" (newMethod ["lbl"; "target"] link)
   |> addSlot "p"
 
 let ObjectVisualizer = 
@@ -652,7 +657,20 @@ LookupExpr |> addMethod "tokens" (newMethod [] (arr [
     ssv?html [ 
       str "ul"; map []; 
       self?get_values([])?map([fnn ["k"; "v"] (
-        ssv?html [ str "li"; map []; arr [ local("k"); str "="; local("v") |> vz ]]
+        ssv?html [ str "li"; map []; arr [ 
+          let rmthis = fnn [] (
+            self?clone([])?``do``([fn "rpl" (
+              local("rpl")?get_values([])?remove([local("k")]) <.> 
+              self?become [local("rpl")] <.>
+              self?``visualizer``([])?``update`` []
+            )]) 
+          )
+          ssv?html [ str "a"; map [ "class", str "remove"; 
+            "href", str "javascript:;"; "click", rmthis ]; arr [ str "x" ] ]
+          local("k"); 
+          str "="; 
+          local("v") |> vz 
+        ]]
       )])?add([
         ssv?html [ str "li"; map []; arr [ 
           ssv?html [ 
